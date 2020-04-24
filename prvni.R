@@ -1,4 +1,3 @@
-setwd("~/doktorske/SPO")
 library(readr)
 library(keras)
 library(dplyr)
@@ -12,6 +11,7 @@ FLAGS <- flags(
   flag_integer("embedding_size", 300)
 )
 
+# tokenizer from Keras
 tokenizer <- text_tokenizer(num_words = FLAGS$vocab_size)
 
 train.prem.subj <- raw.train$PremiseSubj
@@ -50,21 +50,30 @@ txt.compl <- c(train.prem.subj, train.prem.rel, train.prem.obj,
 
 fit_text_tokenizer(tokenizer, txt.compl)
 
+# in different versions of Keras take care about word_index vs. index_word
 word.index <- tokenizer$word_index
 voc.size <- min(length(word.index), FLAGS$vocab_size)
 words <- names(word.index)[1:voc.size]
 
+# first steps in constructing lookup table: index;word
 aux.index.table <- data.frame(Indx=1:voc.size, Wrd=words, stringsAsFactors = F)
 
+# we will use Glove embeddings available within http://nlp.stanford.edu/data/glove.6B.zip archive
 glove <- read_table2("glove.6B.300d.txt", col_names = F, skip = 0, progress = T)
 
+# first column in glove dataframe will be called "Wrd"
 colnames(glove) <- c("Wrd", paste0("S", 1:300))
+
+# attaching glove embeddings to lookup table 
 aux.join <- left_join(aux.index.table, glove, by = "Wrd")
 
+# construction of embedding matrix - in the i-th row, there is a vector of i-th word (w.r.t. tokenization)
 emb.mat <- as.matrix(aux.join[,3:ncol(aux.join)])
 emb.mat[is.na(emb.mat)] <- 0
+# dirty trick - problem of indexing in R vs. Python (first index in R is 1, in Python 0)
 emb.mat2 <- rbind(rep(0, times = 300), emb.mat)
 
+# text are transformed in the sequences of integers w.r.t. tokenization
 s.train.prem.subj <- texts_to_sequences(tokenizer = tokenizer, train.prem.subj)
 s.train.prem.rel <- texts_to_sequences(tokenizer = tokenizer, train.prem.rel)
 s.train.prem.obj <- texts_to_sequences(tokenizer = tokenizer, train.prem.obj)
@@ -86,6 +95,8 @@ s.test.hyp.subj <- texts_to_sequences(tokenizer = tokenizer, test.hyp.subj)
 s.test.hyp.rel <- texts_to_sequences(tokenizer = tokenizer, test.hyp.rel)
 s.test.hyp.obj <- texts_to_sequences(tokenizer = tokenizer, test.hyp.obj)
 
+
+# padding sequences with 0 to the same length
 t.train.prem.subj <- pad_sequences(s.train.prem.subj, maxlen = FLAGS$max_len_padding, value = 0)
 t.train.prem.rel <- pad_sequences(s.train.prem.rel, maxlen = FLAGS$max_len_padding, value = 0)
 t.train.prem.obj <- pad_sequences(s.train.prem.obj, maxlen = FLAGS$max_len_padding, value = 0)
@@ -107,6 +118,7 @@ t.test.hyp.subj <- pad_sequences(s.test.hyp.subj, maxlen = FLAGS$max_len_padding
 t.test.hyp.rel <- pad_sequences(s.test.hyp.rel, maxlen = FLAGS$max_len_padding, value = 0)
 t.test.hyp.obj <- pad_sequences(s.test.hyp.obj, maxlen = FLAGS$max_len_padding, value = 0)
 
+# one-hot encoding of categorical variables (we do not use to_categorical function in Keras) 
 make.labels <- function(clss) {
   len <- length(clss)
   res <- matrix(0, nrow = len, ncol = 3)
@@ -137,7 +149,7 @@ embeddovaci <- layer_embedding(
   output_dim = FLAGS$embedding_size,
   input_length = FLAGS$max_len_padding,
   
-  # weights are stored in the embedding matrix
+  # weights are stored in the embedding matrix, first row contains null vector
   weights = list(emb.mat2),
   
   # word embeddings are not trained
@@ -147,6 +159,7 @@ embeddovaci <- layer_embedding(
 subob <- layer_dense(units = 64, activation = 'relu')
 relational <- layer_dense(units = 20, activation = 'relu')
 
+# encoding of a subject of the premise is obtained by summing word embeddings, the result is fed to a dense layer (64 units)
 enc.prem.subj <- input.prem.subj %>% embeddovaci %>% k_sum(axis = 2) %>% subob
 enc.prem.rel <- input.prem.rel %>% embeddovaci %>% k_sum(axis = 2) %>% relational
 enc.prem.obj <- input.prem.obj %>% embeddovaci %>% k_sum(axis = 2) %>% subob
@@ -155,8 +168,10 @@ enc.hyp.subj <- input.hyp.subj %>% embeddovaci %>% k_sum(axis = 2) %>% subob
 enc.hyp.rel <- input.hyp.rel %>% embeddovaci %>% k_sum(axis = 2) %>% relational
 enc.hyp.obj <- input.hyp.obj %>% embeddovaci %>% k_sum(axis = 2) %>% subob
 
+# representations of all parts of both triples are concatenated  
 finrep <- layer_concatenate(list(enc.prem.subj, enc.prem.rel, enc.prem.obj, enc.hyp.subj, enc.hyp.rel, enc.hyp.obj))
 
+# concatenated representations are fed to top dense layers
 predictions <- finrep  %>% layer_dense(16, activation = "relu") %>% layer_dense(3, activation = "softmax")
 
 model <- keras_model(inputs = list(input.prem.subj, input.prem.rel, input.prem.obj, input.hyp.subj, input.hyp.rel, input.hyp.obj), outputs = predictions)
